@@ -1,0 +1,18 @@
+module stateCounter (
+    input clk,  // clock
+    input rst,  // reset
+    output inc_state
+ 
+  ) {
+
+  dff stateCounter[28](.clk(clk));
+  
+  always { //count increment
+    inc_state = stateCounter.q[27];
+    stateCounter.d = stateCounter.q + 1;
+    if (stateCounter.q[27]==1) {
+      stateCounter.d[27] = 0; //count timer reset
+    } 
+    
+  }
+}
