@@ -1,0 +1,866 @@
+module mojo_top (
+    input clk,              // 50MHz clock
+    input rst_n,            // reset button (active low)
+    output led [8],         // 8 user controllable LEDs
+    input cclk,             // configuration clock, AVR ready when high
+    output spi_miso,        // AVR SPI MISO
+    input spi_ss,           // AVR SPI Slave Select
+    input spi_mosi,         // AVR SPI MOSI
+    input spi_sck,          // AVR SPI Clock
+    output spi_channel [4], // AVR general purpose pins (used by default to select ADC channel)
+    input avr_tx,           // AVR TX (FPGA RX)
+    output avr_rx,          // AVR RX (FPGA TX)
+    input avr_rx_busy,      // AVR RX buffer full
+    output io_led [3][8],   // LEDs on IO Shield
+    output io_seg [8],      // 7-segment LEDs on IO Shield
+    output io_sel [4],      // Digit select on IO Shield
+    input io_button [5],    // 5 buttons on IO Shield
+    input io_dip [3][8]     // DIP switches on IO Shield
+  ) {
+  
+  sig rst;                  // reset signal
+  
+  .clk(clk) {
+    // The reset conditioner is used to synchronize the reset signal to the FPGA
+    // clock. This ensures the entire FPGA comes out of reset at the same time.
+    reset_conditioner reset_cond;
+    
+    edge_detector edge_detector (#RISE(1), #FALL(0));
+    
+    .rst(rst) {
+      multi_seven_seg seg;
+      multi_dec_ctr dec_ctr;
+      dff display[3] (#INIT(0));
+      dff vala[16] (#INIT(0));
+      dff valb[16] (#INIT(0));      
+      counter ctr (#SIZE(3), #DIV(16));//counter to light up led segments 
+    }
+  }
+  
+  sig alufn[6]; //16-bit input alufn
+  sig a[16]; //16-bit input a 
+  sig b[16]; //16-bit input b
+  sig alu[16]; //16-bit output of alu
+  alu alu1; //call alu mod
+  sig x[16]; //store variable
+  fsm state(.clk(clk)) = {IDLE, ADD, ADD_OF, SUB, SUB_OF, AND, OR, XOR, A, SHL, SHR, SHA, CMPEQ, CMPLT, CMPLE, MULTIPLY, MOD, CFMFAIL, FAIL}; //fsm state machine for all stages
+  stateCounter sc(.clk(clk),.rst(rst)); //timing gate for the counter to loop through all the states
+  
+  always {
+    reset_cond.in = ~rst_n;   // input raw inverted reset signal
+    rst = reset_cond.out;     // conditioned reset
+    
+    led = c{3b0, io_button};  // connect buttons to LEDs
+    spi_miso = bz;            // not using SPI
+    spi_channel = bzzzz;      // not using flags
+    avr_rx = bz;              // not using serial port
+    edge_detector.in = ctr.value;
+    dec_ctr.inc = edge_detector.out;
+    seg.values = {4hf, 4hf, 4hf, 4hf};
+    io_seg = ~seg.seg; // connect segments to the driver
+    io_sel = ~seg.sel; // connect digit select to the driver
+    led[7:0] = 0;
+    
+    alufn = io_dip[2][5:0];
+    if (io_button[0] == 1){ //pressing "UP" button stores a
+          a[15:8] = io_dip[1];
+          a[7:0] = io_dip[0];
+          vala.d = a;
+        }
+    if (io_button[2] == 1){ //pressing "DOWN" button stores b
+          b[15:8] = io_dip[1];
+          b[7:0] = io_dip[0];
+          valb.d = b;
+        }
+    // assigning inputs and output of alu    
+    alu1.alufn = alufn; // alufn input to alu module
+    alu1.a = vala.q; //a input to alu module
+    alu1.b = valb.q; //b input to alu module
+    alu = alu1.alu; //alu module output
+    
+    io_led[2] = alufn; // left leds show output of alu (8bits)
+    if (io_dip[2][7:6] ==b10){
+          x=vala.q;
+          io_led[1] = x[15:8]; // middle leds show input a (8bits)
+          io_led[0] = x[7:0]; // right leds show input a (8bits)
+        }
+    else if (io_dip[2][7:6] ==b01){
+          x=valb.q;
+          io_led[1] = x[15:8]; // middle leds show input b (8bits)
+          io_led[0] = x[7:0]; // right leds show input b (8bits)
+        }
+    else {
+    io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+    io_led[0] = alu[7:0]; // right leds show input output (8bits)
+    }
+    case (state.q) {
+      state.IDLE:
+        display.d = 0; //display is 0 in idle state
+        seg.values = {4hf, 4hf, 4hf, 4h1};
+          if (io_button[1] == 1){ //pressing "CENTER" button initiates transition to TEST states
+            state.d = state.ADD; //transition to testing the alu
+          }
+          if (io_button[3] == 1){ //pressing "LEFT" button initiates transition to TEST states
+            state.d = state.CFMFAIL; //transition to testing the alu
+          }
+        
+      state.FAIL:
+        seg.values = {4h0, 4h1, 4he, 4hf};
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        
+      state.ADD:
+        alu1.alufn = 6b0; //selects addition operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b10; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b11){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b11; // right leds show input output (8bits)
+            seg.values = {4h0, 4h1, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b11) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.ADD_OF;
+          }
+        
+      state.ADD_OF:
+        alu1.alufn = 6b0; //selects addition operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b0100000000000001; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b0100000000000000; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1000000000000001){
+            io_led[1] = 8b10000000; // middle leds show input output (8bits)
+            io_led[0] = 8b00000001; // right leds show input output (8bits)
+            seg.values = {4h0, 4h1, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1000000000000001) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.SUB;
+          }
+        state.SUB:
+        alu1.alufn = 6b000001; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h2, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h2, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h2, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b0){
+            io_led[1] = 8b00000000; // middle leds show input output (8bits)
+            io_led[0] = 8b00000000; // right leds show input output (8bits)
+            seg.values = {4h0, 4h2, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b0) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.SUB_OF;
+          }
+        state.SUB_OF:
+        alu1.alufn = 6b000001; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1011111111111111; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h2, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b0100000000000000; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h2, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h2, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b0111111111111111){
+            io_led[1] = 8b01111111; // middle leds show input output (8bits)
+            io_led[0] = 8b11111111; // right leds show input output (8bits)
+            seg.values = {4h0, 4h2, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b0111111111111111) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h2, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.MULTIPLY;
+          }
+        state.AND:
+        alu1.alufn = 6b011000; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h1, 4h1, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b11; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h1, 4h1, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h1, 4h1, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b00000001; // right leds show input output (8bits)
+            seg.values = {4h1, 4h1, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h1, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.OR;
+          }
+        state.OR:
+        alu1.alufn = 6b011110; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h1, 4h2, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1111; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h1, 4h2, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h1, 4h2, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1111){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b00001111; // right leds show input output (8bits)
+            seg.values = {4h1, 4h2, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1111) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h1, 4h2, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.XOR;
+          }
+        state.XOR:
+        alu1.alufn = 6b010110; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h1, 4h3, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1100; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h1, 4h3, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h1, 4h3, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b0110){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b00000110; // right leds show input output (8bits)
+            seg.values = {4h1, 4h3, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b0110) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h1, 4h3, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.A;
+          }
+        state.A:
+        alu1.alufn = 6b011010; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h1, 4h4, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1100; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h1, 4h4, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h1, 4h4, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1010){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b00001010; // right leds show input output (8bits)
+            seg.values = {4h1, 4h4, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1010) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h1, 4h4, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.SHL;
+          }
+        state.SHL:
+        alu1.alufn = 6b100000; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h2, 4h1, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b11; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h2, 4h1, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h2, 4h1, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1010000){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b01010000; // right leds show input output (8bits)
+            seg.values = {4h2, 4h1, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1010000) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h2, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.SHR;
+          }
+        state.SHR:
+        alu1.alufn = 6b100001; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010000; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h2, 4h2, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b11; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h2, 4h2, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h2, 4h2, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1010){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b1010; // right leds show input output (8bits)
+            seg.values = {4h2, 4h2, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1010) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h2, 4h2, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.SHA;
+          }
+        state.SHA:
+        alu1.alufn = 6b100011; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1000000000001000; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h2, 4h3, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b11; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h2, 4h3, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h2, 4h3, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1111000000000001){
+            io_led[1] = 8b11110000; // middle leds show input output (8bits)
+            io_led[0] = 8b00000001; // right leds show input output (8bits)
+            seg.values = {4h2, 4h3, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1111000000000001) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h2, 4h3, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.CMPEQ;
+          }
+        state.CMPEQ:
+        alu1.alufn = 6b110010; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h3, 4h1, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1010; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h3, 4h1, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h3, 4h1, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b1; // right leds show input output (8bits)
+            seg.values = {4h3, 4h1, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h3, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.CMPLT;
+          }
+        state.CMPLT:
+        alu1.alufn = 6b110100; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h3, 4h2, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1010; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h3, 4h2, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h3, 4h2, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b0){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b0; // right leds show input output (8bits)
+            seg.values = {4h3, 4h2, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b0) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h3, 4h2, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.CMPLE;
+          }
+        state.CMPLE:
+        alu1.alufn = 6b110110; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1010; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h3, 4h3, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b1010; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h3, 4h3, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h3, 4h3, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b1){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b1; // right leds show input output (8bits)
+            seg.values = {4h3, 4h3, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b1) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h3, 4h3, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.IDLE;
+          }
+        state.MULTIPLY:
+        alu1.alufn = 6b000010; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b10; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h3, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b10; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h3, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h3, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b100){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b100; // right leds show input output (8bits)
+            seg.values = {4h0, 4h3, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b100) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h3, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.MOD;
+          }
+        state.MOD:
+        alu1.alufn = 6b000011; //selects subtraction operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b10; //1
+            vala.d = x; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h4, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b100; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h4, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h4, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b10){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b10; // right leds show input output (8bits)
+            seg.values = {4h0, 4h4, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b10) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h4, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.AND;
+          }
+        state.CFMFAIL:
+        alu1.alufn = 6b0; //selects addition operation of alu
+        if (rst_n == 0) { //reset
+          state.d = state.IDLE; //move to idle state
+        }
+        if (sc.inc_state ==1) {
+          display.d = display.q+1;
+        }
+          if (display.q ==0){
+            x = 16b1; //1
+            vala.d = 16b0; //store test value to a
+            io_led[1] = x[15:8]; // middle leds show input a (8bits)
+            io_led[0] = x[7:0]; // right leds show input a (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4ha};
+          } 
+          if (display.q ==1){
+            x = 16b10; //2
+            valb.d = x; //store test value to b
+            io_led[1] = x[15:8]; // middle leds show input b (8bits)
+            io_led[0] = x[7:0]; // right leds show input b (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4hb};
+          } 
+          if (display.q ==2){
+            io_led[1] = alu[15:8]; // middle leds show input output (8bits)
+            io_led[0] = alu[7:0]; // right leds show input output (8bits)
+            seg.values = {4h0, 4h1, 4hf, 4h0}; //out shown on 7seg
+          }
+          if (display.q ==3 && alu ==16b11){
+            io_led[1] = 8b0; // middle leds show input output (8bits)
+            io_led[0] = 8b11; // right leds show input output (8bits)
+            seg.values = {4h0, 4h1, 4hd, 4hf}; //Pass shown on 7seg
+          } else if (display.q ==3 && alu !=16b11) {
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.FAIL;
+            seg.values = {4h0, 4h1, 4he, 4hf}; //fail shown on 7seg
+          }
+          if (display.q ==4){
+            display.d = 0;
+            vala.d=0; //reset input a
+            valb.d=0; //reset input b
+            state.d = state.IDLE;
+          }
+        
+   
+    }
+  }    
+}
