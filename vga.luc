@@ -1,0 +1,202 @@
+module vga (
+    input clk,  // clock
+    input rst,  // reset
+    output red,
+    output blue,
+    output green,
+    output hsync,
+    output vsync,
+    input up,
+    input down,
+    input up1,
+    input down1
+  ) {
+  .clk(clk) {
+  
+    .rst(rst){
+    dff pixel[11];
+    dff line[11];
+    dff player1[11] (#INIT(300));
+    dff player2[11] (#INIT(300));
+    dff ballX[11] (#INIT(400));
+    dff ballY[11] (#INIT(300));
+    dff ballDirX[1] (#INIT(1));
+    dff ballDirY[1] (#INIT(1));
+    stateCounter stateCounter1(.btn(up),.btn1(down),.btn2(up1),.btn3(down1));
+    }
+  }
+  var border;
+  var bordersize;
+  var padsize;
+  var p1;
+  var p2;
+  var ball;
+  var ball_inX;
+  var ball_inY;
+  var bouncingObject;
+  sig collisionX1, collisionX2, collisionY1, collisionY2,collisionX3,collisionX4;
+  var resetcollision;
+  var updateballpos;
+  signed sig ball_dirX, ball_dirY;
+  
+  always {
+  bordersize=10;
+  padsize=50;
+  border = (pixel.q>(800-bordersize))||(pixel.q<bordersize)||(line.q>(600-bordersize))||(line.q<bordersize);    //border
+  if((player1.q>(600-bordersize-padsize))){                                            //player 1 border
+      player1.d = 600-bordersize-padsize;
+      }
+      else if((player1.q<(bordersize+padsize))){
+      player1.d = bordersize+padsize+1;
+      }
+      else{
+      if(stateCounter1.inc_state==1){
+      player1.d = player1.q + 1;
+      //player1.d = player1.q - down;
+        }
+      else if(stateCounter1.dec_state==1){
+      player1.d = player1.q - 1;
+        }
+      }
+  if((player2.q>(600-bordersize-padsize))){                                            //player 2 border
+      player2.d = 600-bordersize-padsize;
+      }
+      else if((player2.q<(bordersize+padsize))){
+      player2.d = bordersize+padsize+1;
+      }
+      else{
+      if(stateCounter1.inc1_state==1){
+      player2.d = player2.q + 1;
+      //player1.d = player1.q - down;
+        }
+      else if(stateCounter1.dec1_state==1){
+      player2.d = player2.q - 1;
+        }
+      }  
+  p1 = (pixel.q>20)&&(pixel.q<30)&&(line.q>(player1.q-padsize))&&(line.q<(player1.q+padsize)); //player1 pad
+  p2 = (pixel.q>770)&&(pixel.q<780)&&(line.q>(player2.q-padsize))&&(line.q<(player2.q+padsize)); //player2 pad
+    
+
+    
+    //display
+    if (pixel.q < 800 && line.q < 600) {
+    if(ballX.q==0 && ballY.q==0){
+      ballX.d =400;
+      ballY.d =300;
+      //ball_dirY=1;
+      //ball_dirX=1;
+      }
+     ball_inX=ballX.q+20;
+     ball_inY=ballY.q+20;
+    ball = (pixel.q>ballX.q)&&(pixel.q<(ball_inX))&&(line.q>ballY.q)&&(line.q<(ball_inY));
+
+    bouncingObject = border|p1|p2;
+    
+    
+    collisionX1 = ((ballX.q==10)); //left collision
+    collisionX2 = ((ball_inX==790)); //right collision
+    collisionX3 = ((ballX.q==30)&((ball_inY>(player1.q-padsize))&(ballY.q<(player1.q+padsize)))); //p1 collision
+    collisionX4 = ((ball_inX==770)&((ball_inY>(player2.q-padsize))&(ballY.q<(player2.q+padsize)))); //p1 collision
+    collisionY1 = ((ballY.q==10)); //top collision
+    collisionY2 = ((ball_inY==590)); //bot collision
+    
+        /*if(collisionX1){
+          ballDirX.d=0;
+          ballDirY.d=0;
+        }
+        if(collisionX2){
+          ballDirX.d=0;
+          ballDirY.d=0;
+        }
+        if(collisionX3){
+          ballDirX.d=1;
+        }
+        if(collisionX4){
+          ballDirX.d=$signed(-1);
+        }
+        if(collisionY1){
+          ballDirY.d=1;
+        }
+        if(collisionY2){
+          ballDirY.d=$signed(-1);
+        }*/
+        
+        if(collisionX1){
+          ballX.d =400;
+          ballY.d =300;
+          //ballDirX.d=1;
+        }
+        if(collisionX2){
+          ballX.d =400;
+          ballY.d =300;
+          //ballDirX.d=0;
+        }
+        if(collisionX3){
+          ballDirX.d=1;
+        }
+        if(collisionX4){
+          ballDirX.d=0;
+        }
+        if(collisionY1){
+          ballDirY.d=1;
+        }
+        if(collisionY2){
+          ballDirY.d=0;
+        }
+      
+    updateballpos = stateCounter1.updateball;
+    
+    if(updateballpos)
+      { 
+        if(ballDirX.q){
+          ballX.d = ballX.q + 1; //move right
+        }
+        else{
+          ballX.d = ballX.q - 1; //move left
+        }
+        if(ballDirY.q){
+          ballY.d = ballY.q + 1; //move down
+        }
+        else{
+          ballY.d = ballY.q - 1; //move up
+        }
+      }        
+      
+      
+      red = border|p1|p2;
+      green = border|ball;
+      blue = border;
+  } else {
+    // always output 0 outside the visible frame
+    red = 0;
+    green = 0;
+    blue = 0;
+  }
+
+  // horizontal sync
+  if (pixel.q >= 800+56-1 && pixel.q <= 800+56-1+119) {
+    hsync = 1;
+  } else {
+    hsync = 0;
+  }
+
+  // vertical refresh
+  if (line.q >= 600+37-1 && line.q <= 600+37-1+5) {
+    vsync = 1;
+  } else {
+    vsync = 0;
+  }
+
+  // advance pixel and line counters
+  if (pixel.q == 800+56+120+64-1) {
+    if (line.q == 600+37+6+23-1) {
+      line.d = 0;
+    } else {
+      line.d = line.q + 1;
+    }
+    pixel.d = 0;
+  } else {
+    pixel.d = pixel.q + 1;
+  }
+  }
+}
